@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Zen Dodger</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #0e0f14;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto;
+      color: #e8edf7;
+      overflow: hidden;
+    }
+    canvas { display: block; }
+    .hud {
+      position: fixed; left: 50%; top: 24px; transform: translateX(-50%);
+      background: rgba(20,24,33,0.55);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 12px; padding: 8px 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    .hud b { color: #bcd7ff; }
+    .btn {
+      position: fixed; right: 24px; top: 24px;
+      background: linear-gradient(135deg,#6aa8ff,#9b7df8);
+      color: white; border: none; border-radius: 999px;
+      padding: 10px 14px; cursor: pointer; font-weight: 600;
+      box-shadow: 0 10px 24px rgba(107,168,255,0.35);
+    }
+    .btn:active { transform: translateY(1px); }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hud">Score: <b id="score">0</b> • Best: <b id="best">0</b> • Press R to reset</div>
+  <button class="btn" id="reset">Reset</button>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let w = canvas.width = innerWidth;
+    let h = canvas.height = innerHeight;
+
+    const scoreEl = document.getElementById('score');
+    const bestEl  = document.getElementById('best');
+    const resetBtn= document.getElementById('reset');
+
+    let time = 0;
+    let score = 0;
+    let best = +localStorage.getItem('zen_best') || 0;
+    bestEl.textContent = best;
+
+    const keys = new Set();
+    addEventListener('keydown', e => keys.add(e.key.toLowerCase()));
+    addEventListener('keyup',   e => keys.delete(e.key.toLowerCase()));
+    addEventListener('resize', ()=> { w = canvas.width = innerWidth; h = canvas.height = innerHeight; });
+    resetBtn.onclick = () => reset();
+    addEventListener('keydown', e => { if (e.key.toLowerCase() === 'r') reset(); });
+
+    // Smooth random helpers
+    const rand = (a=0,b=1) => a + Math.random()*(b-a);
+    const lerp = (a,b,t) => a + (b-a)*t;
+    const clamp= (v,a,b) => Math.max(a, Math.min(b, v));
+
+    // Background gradient parameters
+    let gradA = {h: rand(180, 260), s: 45, l: 12};
+    let gradB = {h: rand(280, 340), s: 60, l: 18};
+
+    const toHSL = (o,a=1) => `hsla(${o.h}, ${o.s}%, ${o.l}%, ${a})`;
+
+    // Player — a leaf with gentle sway
+    const player = {
+      x: w*0.5, y: h*0.6, r: 14,
+      vx: 0, vy: 0,
+      speed: 300,
+      trail: []
+    };
+
+    // Orbs (hazards) with glow
+    const orbs = [];
+    // Seeds (collectibles)
+    const seeds = [];
+    // Particles
+    const particles = [];
+
+    function spawnOrb() {
+      const edge = Math.random() < 0.5 ? 'horizontal' : 'vertical';
+      const o = {
+        x: edge === 'horizontal' ? rand(0, w) : (Math.random() < 0.5 ? -30 : w+30),
+        y: edge === 'vertical'   ? rand(0, h) : (Math.random() < 0.5 ? -30 : h+30),
+        r: rand(10, 24),
+        hue: rand(200, 320),
+        vx: rand(-1,1) * rand(40, 120),
+        vy: rand(-1,1) * rand(40, 120),
+        drift: rand(0.6, 1.2)
+      };
+      orbs.push(o);
+    }
+
+    function spawnSeed() {
+      const s = {
+        x: rand(60, w-60),
+        y: rand(60, h-60),
+        r: 8,
+        t: 0,
+        hue: rand(40, 70)
+      };
+      seeds.push(s);
+    }
+
+    function addParticles(x,y,color,count=12,spread=1) {
+      for (let i=0;i<count;i++){
+        particles.push({
+          x,y,
+          vx: rand(-80,80)*spread,
+          vy: rand(-80,80)*spread,
+          life: rand(0.6, 1.2),
+          age: 0,
+          color
+        });
+      }
+    }
+
+    function drawBackground(dt) {
+      // Slow hue cycling
+      gradA.h += dt*3;
+      gradB.h -= dt*2;
+
+      const g = ctx.createLinearGradient(0,0,w,h);
+      g.addColorStop(0, toHSL(gradA));
+      g.addColorStop(1, toHSL(gradB));
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,w,h);
+
+      // Soft vignette
+      const vg = ctx.createRadialGradient(w*0.5,h*0.6,0,w*0.5,h*0.6, Math.max(w,h)*0.7);
+      vg.addColorStop(0,'rgba(0,0,0,0)');
+      vg.addColorStop(1,'rgba(0,0,0,0.35)');
+      ctx.fillStyle = vg;
+      ctx.fillRect(0,0,w,h);
+    }
+
+    function updatePlayer(dt) {
+      const up = keys.has('arrowup') || keys.has('w');
+      const dn = keys.has('arrowdown') || keys.has('s');
+      const lf = keys.has('arrowleft') || keys.has('a');
+      const rt = keys.has('arrowright') || keys.has('d');
+
+      const ax = (rt - lf);
+      const ay = (dn - up);
+
+      const accel = 800;
+      player.vx = lerp(player.vx, ax * player.speed, dt*2);
+      player.vy = lerp(player.vy, ay * player.speed, dt*2);
+
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
+
+      player.x = clamp(player.x, 20, w-20);
+      player.y = clamp(player.y, 20, h-20);
+
+      // Trail
+      player.trail.push({x:player.x, y:player.y, t:time});
+      if (player.trail.length > 60) player.trail.shift();
+    }
+
+    function drawPlayer() {
+      // Leaf sway
+      const sway = Math.sin(time*2) * 0.2;
+      const hue = 130 + Math.sin(time*0.8)*8;
+      const base = `hsla(${hue}, 50%, 60%, 1)`;
+      const glow = `hsla(${hue}, 70%, 70%, 0.7)`;
+
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(sway);
+
+      // Glow
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.shadowBlur = 24;
+      ctx.shadowColor = glow;
+
+      // Leaf shape
+      ctx.beginPath();
+      ctx.moveTo(0, -player.r);
+      ctx.quadraticCurveTo(player.r*0.9, -player.r*0.6, player.r, 0);
+      ctx.quadraticCurveTo(player.r*0.4, player.r*0.9, 0, player.r);
+      ctx.quadraticCurveTo(-player.r*0.4, player.r*0.9, -player.r, 0);
+      ctx.quadraticCurveTo(-player.r*0.9, -player.r*0.6, 0, -player.r);
+      ctx.closePath();
+      ctx.fillStyle = base;
+      ctx.fill();
+
+      // Mid vein
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.moveTo(0, -player.r*0.8);
+      ctx.lineTo(0, player.r*0.8);
+      ctx.stroke();
+
+      ctx.restore();
+
+      // Trail dots
+      ctx.globalCompositeOperation = 'lighter';
+      for (let i=0;i<player.trail.length;i++){
+        const t = player.trail[i];
+        const age = time - t.t;
+        const a = Math.max(0, 1 - age*0.8);
+        ctx.fillStyle = `hsla(${hue}, 80%, 70%, ${a*0.7})`;
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, Math.max(1, 6*(1-age)), 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function updateOrbs(dt) {
+      // Maintain count
+      while (orbs.length < 10) spawnOrb();
+
+      for (let o of orbs){
+        o.x += o.vx * dt;
+        o.y += o.vy * dt;
+
+        // Gentle drift
+        o.vx += Math.sin(time*o.drift + o.x*0.002) * dt * 20;
+        o.vy += Math.cos(time*o.drift + o.y*0.002) * dt * 20;
+
+        // Wrap
+        if (o.x < -40) o.x = w+40;
+        if (o.x > w+40) o.x = -40;
+        if (o.y < -40) o.y = h+40;
+        if (o.y > h+40) o.y = -40;
+
+        // Collision with player
+        const dx = o.x - player.x;
+        const dy = o.y - player.y;
+        const rr = (o.r + player.r) * 0.9;
+        if (dx*dx + dy*dy < rr*rr) {
+          // Soft reset effect
+          addParticles(player.x, player.y, `hsla(${o.hue},70%,70%,1)`, 40, 1.4);
+          score = Math.max(0, Math.floor(score*0.6)); // penalty but not too harsh
+          shake(10, 250);
+        }
+      }
+    }
+
+    function drawOrbs() {
+      for (let o of orbs){
+        const core = `hsla(${o.hue}, 70%, 65%, 0.9)`;
+        const glow = `hsla(${o.hue}, 70%, 65%, 0.4)`;
+        // Glow
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.shadowBlur = 32;
+        ctx.shadowColor = glow;
+        ctx.beginPath();
+        ctx.arc(o.x, o.y, o.r, 0, Math.PI*2);
+        ctx.fillStyle = core;
+        ctx.fill();
+        ctx.restore();
+
+        // Subtle highlights
+        ctx.beginPath();
+        ctx.arc(o.x - o.r*0.3, o.y - o.r*0.3, o.r*0.35, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(255,255,255,0.06)';
+        ctx.fill();
+      }
+    }
+
+    function updateSeeds(dt) {
+      if (Math.random() < dt * 0.6 && seeds.length < 6) spawnSeed();
+      for (let s of seeds){
+        s.t += dt;
+        s.y += Math.sin(s.t*2 + s.x*0.01) * 12 * dt;
+
+        const dx = s.x - player.x;
+        const dy = s.y - player.y;
+        const rr = (s.r + player.r) * 0.9;
+        if (dx*dx + dy*dy < rr*rr) {
+          score += 10;
+          addParticles(s.x, s.y, `hsla(${s.hue},70%,60%,1)`, 22, 0.8);
+          seeds.splice(seeds.indexOf(s),1);
+        }
+      }
+    }
+
+    function drawSeeds() {
+      for (let s of seeds){
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.shadowBlur = 24;
+        ctx.shadowColor = `hsla(${s.hue}, 70%, 60%, 0.6)`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+        ctx.fillStyle = `hsla(${s.hue}, 70%, 60%, 0.9)`;
+        ctx.fill();
+        ctx.restore();
+
+        // Halo ring
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r+6, 0, Math.PI*2);
+        ctx.strokeStyle = `hsla(${s.hue}, 80%, 70%, 0.2)`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    // Camera shake for feedback
+    let shakeMag = 0, shakeTime = 0;
+    function shake(mag, ms) { shakeMag = mag; shakeTime = ms; }
+    function applyShake(dt) {
+      if (shakeTime > 0) {
+        shakeTime -= dt*1000;
+        const k = shakeMag * (shakeTime/250);
+        ctx.setTransform(1,0,0,1, (Math.random()-0.5)*k, (Math.random()-0.5)*k);
+      } else {
+        ctx.setTransform(1,0,0,1,0,0);
+      }
+    }
+
+    function updateParticles(dt) {
+      for (let p of particles){
+        p.age += dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+      }
+      for (let i=particles.length-1;i>=0;i--){
+        if (particles[i].age > particles[i].life) particles.splice(i,1);
+      }
+    }
+
+    function drawParticles() {
+      ctx.globalCompositeOperation = 'lighter';
+      for (let p of particles){
+        const a = Math.max(0, 1 - p.age / p.life);
+        ctx.fillStyle = p.color.replace(',1)', `,${a})`).replace('hsla','hsla');
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2 + 4*a, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function reset() {
+      score = 0;
+      orbs.length = 0;
+      seeds.length = 0;
+      particles.length = 0;
+      player.x = w*0.5; player.y = h*0.6; player.vx = 0; player.vy = 0;
+    }
+
+    let last = performance.now();
+    function loop(now){
+      const dt = Math.min(0.033, (now - last) / 1000);
+      last = now;
+      time += dt;
+
+      drawBackground(dt);
+      applyShake(dt);
+      updatePlayer(dt);
+      updateOrbs(dt);
+      updateSeeds(dt);
+      updateParticles(dt);
+
+      drawOrbs();
+      drawSeeds();
+      drawParticles();
+      drawPlayer();
+
+      scoreEl.textContent = score.toString();
+      if (score > best) { best = score; bestEl.textContent = best; localStorage.setItem('zen_best', best); }
+
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
